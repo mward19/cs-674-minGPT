@@ -10,6 +10,9 @@ import torch
 from torch.utils.data.dataloader import DataLoader
 from mingpt.utils import CfgNode as CN
 
+from mingpt.diehl_modifications import LinearWarmupScheduler
+from mingpt.diehl_modifications import CosineAnnealingWarmupScheduler
+
 class Trainer:
 
     @staticmethod
@@ -26,6 +29,11 @@ class Trainer:
         C.betas = (0.9, 0.95)
         C.weight_decay = 0.1 # only applied on matmul weights
         C.grad_norm_clip = 1.0
+
+        # Extra parameters added for ablations
+        C.lr_linear = False
+        C.lr_cosine = False
+
         return C
 
     def __init__(self, config, model, train_dataset):
@@ -64,12 +72,27 @@ class Trainer:
         # setup the optimizer
         self.optimizer = model.configure_optimizers(config)
 
+        # set up the learning rate scheduler if applicable
+        if config.lr_linear:
+            self.scheduler = LinearWarmupScheduler(
+                self.optimizer, 
+                (2 * config.max_iters) // 3
+            )
+        elif config.lr_cosine:
+            self.scheduler = CosineAnnealingWarmupScheduler(
+                self.optimizer, 
+                config.max_iters // 2, 
+                config.max_iters
+            )
+        else:
+            self.scheduler = None
+
         # setup the dataloader
         train_loader = DataLoader(
             self.train_dataset,
             sampler=torch.utils.data.RandomSampler(self.train_dataset, replacement=True, num_samples=int(1e10)),
             shuffle=False,
-            pin_memory=True,
+            pin_memory=(self.device != 'cpu'),
             batch_size=config.batch_size,
             num_workers=config.num_workers,
         )
@@ -79,8 +102,10 @@ class Trainer:
         self.iter_time = time.time()
         data_iter = iter(train_loader)
         while True:
+            # print(f'Debug. Iter:', self.iter_num)
 
             # fetch the next batch (x, y) and re-init iterator if needed
+            # print(f'Debug. Loading batch')
             try:
                 batch = next(data_iter)
             except StopIteration:
@@ -89,15 +114,18 @@ class Trainer:
             batch = [t.to(self.device) for t in batch]
             x, y = batch
 
+            # print(f'Debug. Forward pass')
             # forward the model
             logits, self.loss = model(x, y)
 
+            # print(f'Debug. Backprop')
             # backprop and update the parameters
             model.zero_grad(set_to_none=True)
             self.loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_norm_clip)
             self.optimizer.step()
 
+            # print(f'Debug. Callbacks')
             self.trigger_callbacks('on_batch_end')
             self.iter_num += 1
             tnow = time.time()
@@ -107,3 +135,9 @@ class Trainer:
             # termination conditions
             if config.max_iters is not None and self.iter_num >= config.max_iters:
                 break
+
+            # Step scheduler
+            if self.scheduler is not None:
+                print(self.scheduler.get_last_lr())
+                self.scheduler.step()
+            
