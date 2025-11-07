@@ -100,7 +100,7 @@ class Block(nn.Module):
         self.mlp = nn.ModuleDict(dict(
             c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd),
             c_proj  = nn.Linear(4 * config.n_embd, config.n_embd),
-            act     = SwiGLU(4 * config.n_embd) if config.swiglu else NewGELU(),
+            act     = SwiGLU() if config.swiglu else NewGELU(),
             dropout = nn.Dropout(config.resid_pdrop),
         ))
         m = self.mlp
